@@ -13,6 +13,11 @@ RUN CGO_ENABLED=1 go build -o /wonder ./cmd/wonder
 # Runtime stage
 FROM alpine:3.20
 
+LABEL org.opencontainers.image.source="https://github.com/STRRL/wonder-mesh-net" \
+      org.opencontainers.image.url="https://github.com/STRRL/wonder-mesh-net" \
+      org.opencontainers.image.title="wonder-mesh-net" \
+      org.opencontainers.image.description="PaaS bootstrapper turning homelab/edge machines into BYO compute"
+
 RUN apk add --no-cache ca-certificates tzdata
 
 # Download Headscale binary with checksum verification
