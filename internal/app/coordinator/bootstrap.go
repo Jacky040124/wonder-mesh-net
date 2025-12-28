@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/controller"
 )
 
@@ -30,28 +29,28 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	coordinatorRouter := chi.NewRouter()
-	coordinatorRouter.Get("/health", healthController.ServeHTTP)
-	coordinatorRouter.Get("/oidc/providers", oidcController.HandleProviders)
-	coordinatorRouter.Get("/oidc/login", oidcController.HandleLogin)
-	coordinatorRouter.Get("/oidc/callback", oidcController.HandleCallback)
-	coordinatorRouter.Get("/oidc/complete", oidcController.HandleComplete)
-	coordinatorRouter.Post("/api/v1/authkey", oidcController.HandleCreateAuthKey)
-	coordinatorRouter.Get("/api/v1/nodes", nodesController.HandleListNodes)
-	coordinatorRouter.Get("/api/v1/api-keys", apiKeyController.HandleListAPIKeys)
-	coordinatorRouter.Post("/api/v1/api-keys", apiKeyController.HandleCreateAPIKey)
-	coordinatorRouter.Delete("/api/v1/api-keys/{id}", apiKeyController.HandleDeleteAPIKey)
-	coordinatorRouter.Post("/api/v1/join-token", workerController.HandleCreateJoinToken)
-	coordinatorRouter.Post("/api/v1/worker/join", workerController.HandleWorkerJoin)
-	coordinatorRouter.Post("/api/v1/deployer/join", deployerController.HandleDeployerJoin)
-	coordinatorRouter.Post("/device/code", deviceFlowController.HandleDeviceCode)
-	coordinatorRouter.Get("/device/verify", deviceFlowController.HandleDeviceVerifyPage)
-	coordinatorRouter.Post("/device/verify", deviceFlowController.HandleDeviceVerify)
-	coordinatorRouter.Post("/device/token", deviceFlowController.HandleDeviceToken)
-
-	rootRouter := chi.NewRouter()
-	rootRouter.Mount("/coordinator", coordinatorRouter)
-	rootRouter.NotFound(headscaleProxy.ServeHTTP)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /coordinator/health", healthController.ServeHTTP)
+	mux.HandleFunc("GET /coordinator/oidc/providers", oidcController.HandleProviders)
+	mux.HandleFunc("GET /coordinator/oidc/login", oidcController.HandleLogin)
+	mux.HandleFunc("GET /coordinator/oidc/callback", oidcController.HandleCallback)
+	mux.HandleFunc("GET /coordinator/oidc/complete", oidcController.HandleComplete)
+	mux.HandleFunc("POST /coordinator/api/v1/authkey", oidcController.HandleCreateAuthKey)
+	mux.HandleFunc("GET /coordinator/api/v1/nodes", nodesController.HandleListNodes)
+	mux.HandleFunc("GET /coordinator/api/v1/api-keys", apiKeyController.HandleListAPIKeys)
+	mux.HandleFunc("POST /coordinator/api/v1/api-keys", apiKeyController.HandleCreateAPIKey)
+	mux.HandleFunc("DELETE /coordinator/api/v1/api-keys/{id}", apiKeyController.HandleDeleteAPIKey)
+	mux.HandleFunc("POST /coordinator/api/v1/join-token", workerController.HandleCreateJoinToken)
+	mux.HandleFunc("POST /coordinator/api/v1/worker/join", workerController.HandleWorkerJoin)
+	mux.HandleFunc("POST /coordinator/api/v1/deployer/join", deployerController.HandleDeployerJoin)
+	mux.HandleFunc("POST /coordinator/device/code", deviceFlowController.HandleDeviceCode)
+	mux.HandleFunc("GET /coordinator/device/verify", deviceFlowController.HandleDeviceVerifyPage)
+	mux.HandleFunc("POST /coordinator/device/verify", deviceFlowController.HandleDeviceVerify)
+	mux.HandleFunc("POST /coordinator/device/token", deviceFlowController.HandleDeviceToken)
+	mux.HandleFunc("/coordinator/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	mux.Handle("/", headscaleProxy)
 
 	slog.Info("initializing ACL policy")
 	ctx := context.Background()
@@ -63,7 +62,7 @@ func (s *Server) Run() error {
 
 	httpServer := &http.Server{
 		Addr:    s.config.Listen,
-		Handler: rootRouter,
+		Handler: mux,
 	}
 
 	go func() {
