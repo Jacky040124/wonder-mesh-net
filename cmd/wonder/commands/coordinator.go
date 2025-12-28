@@ -9,6 +9,8 @@ import (
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator"
 )
 
+// NewCoordinatorCmd creates the coordinator subcommand that runs the
+// Wonder Mesh Net coordinator server with embedded Headscale.
 func NewCoordinatorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "coordinator",
@@ -20,6 +22,7 @@ func NewCoordinatorCmd() *cobra.Command {
 	cmd.Flags().String("listen", ":9080", "Coordinator listen address")
 	cmd.Flags().String("public-url", "http://localhost:9080", "Public URL for callbacks")
 
+	// TODO: should map all env to flags, not only subset
 	_ = viper.BindPFlag("coordinator.listen", cmd.Flags().Lookup("listen"))
 	_ = viper.BindPFlag("coordinator.public_url", cmd.Flags().Lookup("public-url"))
 
@@ -37,6 +40,8 @@ func NewCoordinatorCmd() *cobra.Command {
 	return cmd
 }
 
+// runCoordinator initializes and starts the coordinator server
+// using configuration from flags and environment variables.
 func runCoordinator(cmd *cobra.Command, args []string) {
 	var cfg coordinator.Config
 	cfg.Listen = viper.GetString("coordinator.listen")
@@ -56,7 +61,7 @@ func runCoordinator(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	server, err := coordinator.NewServer(&cfg)
+	server, err := coordinator.BootstrapNewServer(&cfg)
 	if err != nil {
 		slog.Error("create server", "error", err)
 		os.Exit(1)

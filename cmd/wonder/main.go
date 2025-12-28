@@ -10,6 +10,7 @@ import (
 	"github.com/strrl/wonder-mesh-net/cmd/wonder/commands/worker"
 )
 
+// newRootCmd creates the root cobra command for the wonder CLI.
 func newRootCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "wonder",
@@ -19,10 +20,12 @@ to the internet, making them accessible to PaaS platforms and orchestration tool
 	}
 }
 
-func initConfig(cfgFile *string) func() {
+// initConfig returns a configuration initializer that sets up viper
+// to read from config files and environment variables.
+func initConfig(configFile *string) func() {
 	return func() {
-		if *cfgFile != "" {
-			viper.SetConfigFile(*cfgFile)
+		if *configFile != "" {
+			viper.SetConfigFile(*configFile)
 		} else {
 			home, err := os.UserHomeDir()
 			if err != nil {
@@ -46,17 +49,17 @@ func initConfig(cfgFile *string) func() {
 }
 
 func main() {
-	var cfgFile string
+	var configFile string
 
 	rootCmd := newRootCmd()
 
-	cobra.OnInitialize(initConfig(&cfgFile))
+	cobra.OnInitialize(initConfig(&configFile))
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.wonder/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "config file (default is $HOME/.wonder/config.yaml)")
 
 	rootCmd.AddCommand(commands.NewVersionCmd())
 	rootCmd.AddCommand(commands.NewCoordinatorCmd())
-	rootCmd.AddCommand(worker.NewCmd())
+	rootCmd.AddCommand(worker.NewWorkerCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

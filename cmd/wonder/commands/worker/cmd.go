@@ -4,7 +4,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewCmd() *cobra.Command {
+// NewWorkerCmd creates the worker subcommand group containing commands
+// for managing this device as a worker node in Wonder Mesh Net.
+func NewWorkerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "worker",
 		Short: "Worker node commands",
