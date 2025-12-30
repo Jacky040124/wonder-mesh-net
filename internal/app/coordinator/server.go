@@ -4,24 +4,30 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
+	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/controller"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/database"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/repository"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/service"
 	"github.com/strrl/wonder-mesh-net/pkg/headscale"
 	"github.com/strrl/wonder-mesh-net/pkg/jointoken"
-	"github.com/strrl/wonder-mesh-net/pkg/oidc"
+	"github.com/strrl/wonder-mesh-net/pkg/jwtauth"
+	"github.com/strrl/wonder-mesh-net/pkg/keycloak"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 const minJWTSecretLength = 32
 
-// Server is the coordinator server that manages multi-realm Headscale access.
+// Server is the coordinator server that manages multi-tenant wonder net access.
 type Server struct {
 	config                  *Config
 	db                      *database.Manager
@@ -29,17 +35,16 @@ type Server struct {
 	headscaleClient         v1.HeadscaleServiceClient
 	headscaleProcessManager *headscale.ProcessManager
 
+	// Auth components
+	jwtValidator *jwtauth.Validator
+
 	// Repositories
-	apiKeyRepository     *repository.APIKeyRepository
-	deviceFlowRepository *repository.DeviceRequestRepository
+	wonderNetRepository *repository.WonderNetRepository
 
 	// Services
-	authService       *service.AuthService
-	realmService      *service.RealmService
-	oidcService       *service.OIDCService
-	workerService     *service.WorkerService
-	deviceFlowService *service.DeviceFlowService
-	nodesService      *service.NodesService
+	wonderNetService *service.WonderNetService
+	workerService    *service.WorkerService
+	nodesService     *service.NodesService
 }
 
 // BootstrapNewServer creates a new coordinator server.
@@ -109,17 +114,6 @@ func BootstrapNewServer(config *Config) (*Server, error) {
 	}
 	headscaleClient := v1.NewHeadscaleServiceClient(headscaleConn)
 
-	authStateRepository := repository.NewAuthStateRepository(db.Queries(), 10*time.Minute)
-	oidcRegistry := oidc.NewRegistryWithStore(authStateRepository)
-
-	for _, providerConfig := range config.OIDCProviders() {
-		if err := oidcRegistry.RegisterProvider(ctx, providerConfig); err != nil {
-			slog.Warn("register OIDC provider", "provider", providerConfig.Name, "error", err)
-		} else {
-			slog.Info("registered OIDC provider", "provider", providerConfig.Name)
-		}
-	}
-
 	// Both coordinatorURL and headscaleURL use PublicURL because the coordinator
 	// reverse-proxies Tailscale control plane traffic to embedded Headscale.
 	tokenGenerator := jointoken.NewGenerator(
@@ -129,23 +123,51 @@ func BootstrapNewServer(config *Config) (*Server, error) {
 	)
 
 	// Create repositories
-	userRepository := repository.NewUserRepository(db.Queries())
-	sessionRepository := repository.NewSessionRepository(db.Queries())
-	realmRepository := repository.NewRealmRepository(db.Queries())
-	identityRepository := repository.NewOIDCIdentityRepository(db.Queries())
-	apiKeyRepository := repository.NewAPIKeyRepository(db.Queries())
-	deviceFlowRepository := repository.NewDeviceRequestRepository(db.Queries())
+	wonderNetRepository := repository.NewWonderNetRepository(db.Queries())
+	serviceAccountRepository := repository.NewServiceAccountRepository(db.Queries())
 
-	// Create services
-	realmManager := headscale.NewRealmManager(headscaleClient)
+	// Create Headscale managers
+	wonderNetManager := headscale.NewWonderNetManager(headscaleClient)
 	aclManager := headscale.NewACLManager(headscaleClient)
 
-	authService := service.NewAuthService(sessionRepository, realmRepository, apiKeyRepository)
-	realmService := service.NewRealmService(realmRepository, realmManager, aclManager, config.PublicURL)
-	oidcService := service.NewOIDCService(oidcRegistry, userRepository, identityRepository, realmRepository, realmService)
-	workerService := service.NewWorkerService(tokenGenerator, config.JWTSecret, realmRepository, realmService)
-	deviceFlowService := service.NewDeviceFlowService(deviceFlowRepository, realmService, config.PublicURL)
-	nodesService := service.NewNodesService(realmManager)
+	// Create Keycloak admin client
+	keycloakClient := keycloak.NewAdminClient(keycloak.AdminClientConfig{
+		URL:          config.KeycloakURL,
+		Realm:        config.KeycloakRealm,
+		ClientID:     config.KeycloakAdminClient,
+		ClientSecret: config.KeycloakAdminSecret,
+	})
+
+	// Authenticate Keycloak admin client
+	if err := keycloakClient.Authenticate(ctx); err != nil {
+		_ = headscaleProcessManager.Stop()
+		_ = db.Close()
+		return nil, fmt.Errorf("authenticate keycloak admin client: %w", err)
+	}
+	slog.Info("authenticated with Keycloak admin API")
+
+	// Create services
+	wonderNetService := service.NewWonderNetService(wonderNetRepository, serviceAccountRepository, wonderNetManager, aclManager, keycloakClient, config.PublicURL)
+	workerService := service.NewWorkerService(tokenGenerator, config.JWTSecret, wonderNetRepository, wonderNetService)
+	nodesService := service.NewNodesService(wonderNetManager)
+
+	// Create JWT validator for Keycloak tokens
+	jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", config.KeycloakURL, config.KeycloakRealm)
+	issuer := fmt.Sprintf("%s/realms/%s", config.KeycloakURL, config.KeycloakRealm)
+	jwtValidator := jwtauth.NewValidator(jwtauth.ValidatorConfig{
+		JWKSURL:         jwksURL,
+		Issuer:          issuer,
+		Audience:        config.KeycloakClientID,
+		RefreshInterval: 5 * time.Minute,
+	})
+
+	// Start JWT validator background refresh
+	if err := jwtValidator.Start(ctx); err != nil {
+		_ = headscaleProcessManager.Stop()
+		_ = db.Close()
+		return nil, fmt.Errorf("start JWT validator: %w", err)
+	}
+	slog.Info("JWT validator started", "jwks_url", jwksURL)
 
 	return &Server{
 		config:                  config,
@@ -153,15 +175,151 @@ func BootstrapNewServer(config *Config) (*Server, error) {
 		headscaleConn:           headscaleConn,
 		headscaleClient:         headscaleClient,
 		headscaleProcessManager: headscaleProcessManager,
-		apiKeyRepository:        apiKeyRepository,
-		deviceFlowRepository:    deviceFlowRepository,
-		authService:             authService,
-		realmService:            realmService,
-		oidcService:             oidcService,
+		jwtValidator:            jwtValidator,
+		wonderNetRepository:     wonderNetRepository,
+		wonderNetService:        wonderNetService,
 		workerService:           workerService,
-		deviceFlowService:       deviceFlowService,
 		nodesService:            nodesService,
 	}, nil
+}
+
+// requireAuth wraps a handler with JWT authentication.
+// It validates the JWT token and adds the claims to the request context.
+// This middleware only handles authentication, not WonderNet resolution.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := extractBearerToken(r)
+		if token == "" {
+			http.Error(w, "authorization required", http.StatusUnauthorized)
+			return
+		}
+
+		claims, err := s.jwtValidator.Validate(token)
+		if err != nil {
+			slog.Debug("JWT validation failed", "error", err)
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), jwtauth.ContextKeyClaims, claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	}
+}
+
+// requireWonderNet wraps a handler to resolve the WonderNet from JWT claims.
+// For regular users, it auto-creates a WonderNet if none exists.
+// For service accounts, it looks up the associated WonderNet.
+// Must be used after requireAuth.
+func (s *Server) requireWonderNet(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims := jwtauth.ClaimsFromContext(r.Context())
+		if claims == nil {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+
+		wonderNet, isServiceAccount, err := s.wonderNetService.ResolveWonderNetFromClaims(r.Context(), claims)
+		if err != nil {
+			if isServiceAccount {
+				slog.Error("get service account wonder net", "error", err)
+				http.Error(w, "service account not associated with wonder net", http.StatusUnauthorized)
+				return
+			}
+			slog.Error("get or create wonder net", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), controller.ContextKeyWonderNet, wonderNet)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	}
+}
+
+func extractBearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return ""
+	}
+	parts := strings.SplitN(auth, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return parts[1]
+}
+
+// Run starts the HTTP server and blocks until a shutdown signal is received.
+// It registers all API routes, starts listening on the configured address,
+// and handles graceful shutdown on SIGINT or SIGTERM with a 10-second timeout.
+func (s *Server) Run() error {
+	healthController := controller.NewHealthController(s.headscaleClient)
+	workerController := controller.NewWorkerController(s.workerService)
+	joinTokenController := controller.NewJoinTokenController(s.workerService)
+	nodesController := controller.NewNodesController(s.nodesService)
+	serviceAccountController := controller.NewServiceAccountController(s.wonderNetService)
+	deployerController := controller.NewDeployerController(s.wonderNetService)
+
+	headscaleProxy, err := controller.NewHeadscaleProxyController("http://127.0.0.1:8080")
+	if err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /coordinator/health", healthController.ServeHTTP)
+
+	// Worker endpoints (join token exchange doesn't require auth)
+	mux.HandleFunc("POST /coordinator/api/v1/worker/join", workerController.HandleWorkerJoin)
+
+	// Protected endpoints - require JWT authentication and WonderNet
+	mux.HandleFunc("POST /coordinator/api/v1/join-token", s.requireAuth(s.requireWonderNet(joinTokenController.HandleCreateJoinToken)))
+	mux.HandleFunc("GET /coordinator/api/v1/nodes", s.requireAuth(s.requireWonderNet(nodesController.HandleListNodes)))
+	mux.HandleFunc("POST /coordinator/api/v1/service-accounts", s.requireAuth(s.requireWonderNet(serviceAccountController.HandleCreate)))
+	mux.HandleFunc("GET /coordinator/api/v1/service-accounts", s.requireAuth(s.requireWonderNet(serviceAccountController.HandleList)))
+	mux.HandleFunc("DELETE /coordinator/api/v1/service-accounts/{id}", s.requireAuth(s.requireWonderNet(serviceAccountController.HandleDelete)))
+	mux.HandleFunc("POST /coordinator/api/v1/deployer/join", s.requireAuth(s.requireWonderNet(deployerController.HandleDeployerJoin)))
+
+	mux.HandleFunc("/coordinator/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	mux.Handle("/", headscaleProxy)
+
+	slog.Info("initializing ACL policy")
+	ctx := context.Background()
+	if err := s.wonderNetService.InitializeACLPolicy(ctx); err != nil {
+		slog.Warn("initialize ACL policy", "error", err)
+	} else {
+		slog.Info("ACL policy initialized successfully")
+	}
+
+	httpServer := &http.Server{
+		Addr:    s.config.Listen,
+		Handler: mux,
+	}
+
+	go func() {
+		slog.Info("starting coordinator",
+			"listen", s.config.Listen,
+			"coordinator_api", s.config.PublicURL+"/coordinator/*",
+			"headscale", s.config.PublicURL+"/*",
+			"keycloak", s.config.KeycloakURL)
+		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	slog.Info("shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		return err
+	}
+
+	return s.Close()
 }
 
 // Close closes all server resources
