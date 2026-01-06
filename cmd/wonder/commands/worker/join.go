@@ -6,14 +6,38 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/strrl/wonder-mesh-net/pkg/jointoken"
 )
+
+// normalizeURL ensures the URL has a protocol scheme and extracts only the
+// scheme and host (including port). Any path, query, or fragment is discarded.
+// If no scheme is present, https:// is prepended.
+func normalizeURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+
+	rawURL = strings.TrimRight(rawURL, "/")
+
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		rawURL = "https://" + rawURL
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	return parsed.Scheme + "://" + parsed.Host
+}
 
 var joinFlags struct {
 	coordinatorURL string
@@ -60,6 +84,7 @@ func runJoin(cmd *cobra.Command, args []string) error {
 	if joinFlags.coordinatorURL != "" {
 		coordinatorURL = joinFlags.coordinatorURL
 	}
+	coordinatorURL = normalizeURL(coordinatorURL)
 
 	reqBody, _ := json.Marshal(map[string]string{"token": token})
 	resp, err := http.Post(
