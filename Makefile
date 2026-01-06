@@ -1,10 +1,15 @@
-.PHONY: help build build-all clean test check image generate
+.PHONY: help build build-go build-all clean test check image generate webui webui-deps webui-clean
 
 # Build variables
 BINARY_NAME := wonder
 BUILD_DIR := bin
 GO := go
 GOFLAGS := -v
+
+# Web UI variables
+WEBUI_DIR := webui
+WEBUI_DIST := $(WEBUI_DIR)/dist
+WEBUI_STATIC := internal/app/coordinator/webui/static
 
 # Version info: tag if tagged, "untagged" otherwise; sha with -dirty suffix if dirty
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -32,9 +37,22 @@ help: ## Show this help message
 	@echo "Targets:"
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  %-15s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-build: ## Build the wonder binary
+webui-deps: ## Install web UI dependencies
+	cd $(WEBUI_DIR) && npm ci
+
+webui: webui-deps ## Build web UI
+	cd $(WEBUI_DIR) && npm run build
+	rm -rf $(WEBUI_STATIC)/assets
+	cp -r $(WEBUI_DIST)/* $(WEBUI_STATIC)/
+
+webui-clean: ## Clean web UI build artifacts
+	rm -rf $(WEBUI_DIR)/node_modules $(WEBUI_DIST) $(WEBUI_STATIC)/assets
+
+build-go: ## Build Go binary only (uses existing/placeholder UI)
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/wonder
+
+build: webui build-go ## Build the wonder binary (includes web UI)
 
 build-all: ## Build for all platforms (linux/darwin, amd64/arm64)
 	@mkdir -p $(BUILD_DIR)
@@ -43,7 +61,7 @@ build-all: ## Build for all platforms (linux/darwin, amd64/arm64)
 	GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/wonder
 	GOOS=darwin GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/wonder
 
-clean: ## Remove build artifacts
+clean: webui-clean ## Remove build artifacts
 	rm -rf $(BUILD_DIR)
 	rm -f coverage.out
 

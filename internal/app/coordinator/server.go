@@ -16,6 +16,7 @@ import (
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/database"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/repository"
 	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/service"
+	"github.com/strrl/wonder-mesh-net/internal/app/coordinator/webui"
 	"github.com/strrl/wonder-mesh-net/pkg/apikey"
 	"github.com/strrl/wonder-mesh-net/pkg/headscale"
 	"github.com/strrl/wonder-mesh-net/pkg/jointoken"
@@ -360,6 +361,14 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/coordinator/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
+
+	// Web UI - served at /ui/
+	uiHandler, err := webui.Handler()
+	if err != nil {
+		return fmt.Errorf("initialize ui handler: %w", err)
+	}
+	mux.Handle("/ui/", http.StripPrefix("/ui", uiHandler))
+
 	mux.Handle("/", headscaleProxy)
 
 	slog.Info("initializing ACL policy")
