@@ -31,9 +31,9 @@ func NewClient(coordinatorURL, apiKey string) *Client {
 type Node struct {
 	ID        uint64   `json:"id"`
 	Name      string   `json:"name"`
-	Addresses []string `json:"ipAddresses"`
+	Addresses []string `json:"ip_addresses"`
 	Online    bool     `json:"online"`
-	LastSeen  string   `json:"lastSeen,omitempty"`
+	LastSeen  string   `json:"last_seen,omitempty"`
 }
 
 // ListNodes returns all nodes for a user session or API key.
