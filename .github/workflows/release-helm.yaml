@@ -23,7 +23,7 @@ jobs:
           echo "chart_version=${TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Publish Helm chart
-        uses: stefanprodan/helm-gh-pages@v1
+        uses: stefanprodan/helm-gh-pages@v1.7.0
         with:
           token: ${{ secrets.HELM_TOKEN }}
           charts_dir: charts
