@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -61,14 +62,28 @@ func BootstrapNewServer(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("create coordinator data dir: %w", err)
 	}
 
+	driver, err := database.ParseDriver(config.DatabaseDriver)
+	if err != nil {
+		return nil, fmt.Errorf("parse database driver: %w", err)
+	}
+
+	dsn := config.DatabaseDSN
+	if dsn == "" {
+		if driver == database.DriverSQLite {
+			dsn = DefaultDatabaseDSN
+		} else {
+			return nil, fmt.Errorf("database DSN is required for driver %s", driver)
+		}
+	}
+
 	db, err := database.NewManager(database.Config{
-		Driver: database.DriverSQLite,
-		DSN:    DefaultDatabaseDSN,
+		Driver: driver,
+		DSN:    dsn,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize database: %w", err)
 	}
-	slog.Info("database initialized", "driver", database.DriverSQLite, "dsn", DefaultDatabaseDSN)
+	slog.Info("database initialized", "driver", driver, "dsn", redactDSN(dsn))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -144,6 +159,21 @@ func BootstrapNewServer(config *Config) (*Server, error) {
 		nodesService:        nodesService,
 		apiKeyService:       apiKeyService,
 	}, nil
+}
+
+func redactDSN(dsn string) string {
+	// SQLite DSNs use "file:" prefix or plain paths, not URL format
+	if strings.HasPrefix(dsn, "file:") || !strings.Contains(dsn, "://") {
+		return "[sqlite]"
+	}
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		// If parsing fails, return a generic redacted indicator
+		return "[redacted]"
+	}
+	// Go 1.15+ Redacted() method automatically hides passwords
+	return u.Redacted()
 }
 
 // requireAuth wraps a handler with JWT authentication.

@@ -48,6 +48,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "wonder-mesh-net.fullname" . }}-secret
                   key: jwt-secret
+            - name: DB_DRIVER
+              {{- if .Values.postgres.enabled }}
+              value: {{ default "postgres" .Values.coordinator.database.driver | quote }}
+              {{- else }}
+              value: {{ .Values.coordinator.database.driver | quote }}
+              {{- end }}
+            - name: DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "wonder-mesh-net.fullname" . }}-db
+                  key: db-dsn
             - name: HEADSCALE_URL
               value: {{ .Values.headscale.config.server_url | default "http://localhost:8080" | quote }}
             - name: HEADSCALE_UNIX_SOCKET

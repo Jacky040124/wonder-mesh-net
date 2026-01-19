@@ -3,6 +3,10 @@ log_info() {
     echo -e "\033[0;32m[INFO]\033[0m $1"
 }
 
+log_warn() {
+    echo -e "\033[1;33m[WARN]\033[0m $1"
+}
+
 log_error() {
     echo -e "\033[0;31m[ERROR]\033[0m $1"
 }
@@ -11,7 +15,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 NAMESPACE="wonder"
 KEYCLOAK_SVC="wonder-mesh-net-keycloak"
+DB_BACKEND="${1:-${DB_BACKEND:-postgres}}"
 
+case "${DB_BACKEND}" in
+    postgres|pgsql|postgresql)
+        DB_BACKEND="postgres"
+        ;;
+    sqlite|sqlite3)
+        DB_BACKEND="sqlite"
+        ;;
+    *)
+        log_error "Unsupported database backend: ${DB_BACKEND} (expected postgres or sqlite)"
+        exit 1
+        ;;
+esac
+
+KEYCLOAK_PRODUCTION="true"
+POSTGRES_ENABLED="true"
+COORDINATOR_DB_DRIVER="postgres"
+
+if [ "${DB_BACKEND}" = "sqlite" ]; then
+    KEYCLOAK_PRODUCTION="false"
+    POSTGRES_ENABLED="false"
+    COORDINATOR_DB_DRIVER="sqlite"
+fi
+
+log_info "Using database backend: ${DB_BACKEND}"
 log_info "Cleaning up previous installation..."
 helm uninstall wonder-mesh-net -n ${NAMESPACE} 2>/dev/null || true
 kubectl delete ns ${NAMESPACE} 2>/dev/null || true
@@ -31,6 +60,10 @@ docker pull headscale/headscale:0.27.1
 minikube image load headscale/headscale:0.27.1
 docker pull quay.io/keycloak/keycloak:26.0
 minikube image load quay.io/keycloak/keycloak:26.0
+if [ "${DB_BACKEND}" = "postgres" ]; then
+    docker pull postgres:16-alpine
+    minikube image load postgres:16-alpine
+fi
 log_info "Images already available in Minikube"
 
 log_info "Loading images into Minikube..."
@@ -51,8 +84,9 @@ helm install wonder-mesh-net ./charts/wonder-mesh-net \
     --set headscale.image.pullPolicy=IfNotPresent \
     --set keycloak.image.pullPolicy=IfNotPresent \
     --set keycloak.enabled=true \
-    --set keycloak.production=true \
-    --set postgres.enabled=true \
+    --set keycloak.production=${KEYCLOAK_PRODUCTION} \
+    --set coordinator.database.driver=${COORDINATOR_DB_DRIVER} \
+    --set postgres.enabled=${POSTGRES_ENABLED} \
     --set coordinator.publicUrl="http://wonder-mesh-net"
 
 log_info "Waiting for pods to be ready..."
@@ -185,6 +219,8 @@ fi
 log_info "Join token created."
 
 WORKER_PODS=$(kubectl get pod -n ${NAMESPACE} -l app=worker -o jsonpath='{.items[*].metadata.name}')
+WORKER1_POD=""
+WORKER1_IP=""
 
 for pod in ${WORKER_PODS}; do
     log_info "Joining worker ${pod} to mesh..."
@@ -193,6 +229,10 @@ for pod in ${WORKER_PODS}; do
     sleep 5
     IP=$(kubectl exec -n ${NAMESPACE} ${pod} -- tailscale ip -4)
     log_info "Worker ${pod} IP: ${IP}"
+    if [ -z "${WORKER1_POD}" ]; then
+        WORKER1_POD=${pod}
+        WORKER1_IP=${IP}
+    fi
 done
 
 sleep 10
@@ -207,6 +247,96 @@ log_info "Nodes found: ${NODE_COUNT}"
 
 if [ "${NODE_COUNT}" -lt 3 ]; then
     log_error "Expected at least 3 nodes, got ${NODE_COUNT}"
+    exit 1
+fi
+
+if [ -z "${WORKER1_POD}" ] || [ -z "${WORKER1_IP}" ]; then
+    log_error "Missing worker pod or IP for deployer test"
+    exit 1
+fi
+
+log_info "Starting sshd on worker ${WORKER1_POD}..."
+kubectl exec -n ${NAMESPACE} ${WORKER1_POD} -- /usr/sbin/sshd || log_warn "sshd may already be running"
+
+log_info "Creating API key for deployer..."
+API_KEY_RESPONSE=$(kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- curl -s -X POST \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "deployer-key", "expires_in": "24h"}' \
+    "http://${COORDINATOR_SVC}/coordinator/api/v1/api-keys")
+
+API_KEY=$(echo "${API_KEY_RESPONSE}" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+
+if [ -z "${API_KEY}" ]; then
+    log_error "Failed to create API key: ${API_KEY_RESPONSE}"
+    exit 1
+fi
+log_info "API key created."
+
+log_info "Deployer joining mesh with API key..."
+DEPLOYER_JOIN_RESPONSE=$(kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- curl -s -X POST \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    "http://${COORDINATOR_SVC}/coordinator/api/v1/deployer/join")
+
+DEPLOYER_AUTHKEY=$(echo "${DEPLOYER_JOIN_RESPONSE}" | grep -o '"authkey":"[^"]*"' | sed 's/"authkey":"//;s/"$//')
+DEPLOYER_LOGIN_SERVER=$(echo "${DEPLOYER_JOIN_RESPONSE}" | grep -o '"login_server":"[^"]*"' | sed 's/"login_server":"//;s/"$//')
+
+if [ -z "${DEPLOYER_AUTHKEY}" ] || [ -z "${DEPLOYER_LOGIN_SERVER}" ]; then
+    log_error "Failed to get authkey or login server: ${DEPLOYER_JOIN_RESPONSE}"
+    exit 1
+fi
+
+log_info "Starting userspace tailscaled in deployer..."
+kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- sh -c \
+    "tailscaled --tun=userspace-networking --socks5-server=localhost:1055 --state=/tmp/tailscale.state --socket=/tmp/tailscaled.sock >/tmp/tailscaled.log 2>&1 &"
+
+sleep 3
+
+log_info "Deployer joining mesh..."
+kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- tailscale --socket=/tmp/tailscaled.sock up \
+    --authkey="${DEPLOYER_AUTHKEY}" \
+    --login-server="${DEPLOYER_LOGIN_SERVER}"
+
+sleep 3
+
+log_info "Deployer tailscale status:"
+kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- tailscale --socket=/tmp/tailscaled.sock status || true
+
+log_info "Deploying app to Worker 1 via SSH over SOCKS5..."
+kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- \
+    sshpass -p worker ssh -T \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=10 \
+    -o "ProxyCommand=nc -x localhost:1055 %h %p" \
+    root@${WORKER1_IP} \
+    'echo "Hello from deployed app" > /tmp/index.html && nohup python3 -m http.server 8080 -d /tmp > /tmp/httpd.log 2>&1 &'
+
+SSH_EXIT=$?
+if [ ${SSH_EXIT} -ne 0 ]; then
+    log_error "SSH command failed with exit code ${SSH_EXIT}"
+    exit 1
+fi
+log_info "SSH deploy command completed"
+
+log_info "Accessing deployed app via mesh..."
+for i in 1 2 3 4 5; do
+    sleep 2
+    APP_RESPONSE=$(kubectl exec -n ${NAMESPACE} ${DEPLOYER_POD} -- curl -s --connect-timeout 10 --socks5-hostname localhost:1055 \
+        "http://${WORKER1_IP}:8080/index.html" 2>/dev/null || true)
+    if echo "${APP_RESPONSE}" | grep -q "Hello from deployed app"; then
+        log_info "Deployer test PASSED: App accessible via mesh"
+        break
+    fi
+    if [ ${i} -lt 5 ]; then
+        log_info "Retry ${i}: HTTP server not ready yet, waiting..."
+    fi
+done
+
+if ! echo "${APP_RESPONSE}" | grep -q "Hello from deployed app"; then
+    log_error "Deployer test FAILED"
+    echo "Response: ${APP_RESPONSE}"
     exit 1
 fi
 
