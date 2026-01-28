@@ -20,7 +20,6 @@
 package jointoken
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -168,29 +167,6 @@ func ParseUnsafe(tokenString string) (*Claims, error) {
 	}
 
 	return claims, nil
-}
-
-// EncodeForCLI encodes a JWT token in a URL-safe base64 format for CLI usage.
-//
-// This encoding makes tokens easier to copy-paste in terminal environments by:
-//   - Using URL-safe base64 (no + or / characters)
-//   - Omitting padding (no = characters)
-//
-// Use DecodeFromCLI to reverse this encoding.
-func EncodeForCLI(token string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(token))
-}
-
-// DecodeFromCLI decodes a CLI-encoded token back to its original JWT format.
-//
-// Returns the original JWT string, or an error if the input is not valid
-// URL-safe base64 encoding.
-func DecodeFromCLI(encoded string) (string, error) {
-	data, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("decode token: %w", err)
-	}
-	return string(data), nil
 }
 
 // JoinInfo contains a subset of token claims formatted for user display.

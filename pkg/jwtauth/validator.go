@@ -189,28 +189,6 @@ func (v *Validator) Validate(tokenString string) (*Claims, error) {
 	return claims, nil
 }
 
-// HasRole checks if the claims contain a specific realm role.
-func (c *Claims) HasRole(role string) bool {
-	for _, r := range c.RealmAccess.Roles {
-		if r == role {
-			return true
-		}
-	}
-	return false
-}
-
-// HasClientRole checks if the claims contain a specific client role.
-func (c *Claims) HasClientRole(clientID, role string) bool {
-	if access, ok := c.ResourceAccess[clientID]; ok {
-		for _, r := range access.Roles {
-			if r == role {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // IsServiceAccount returns true if this token was issued for a service account.
 // Keycloak service accounts have preferred_username starting with "service-account-".
 func (c *Claims) IsServiceAccount() bool {
